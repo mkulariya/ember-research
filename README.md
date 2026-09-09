@@ -43,31 +43,3 @@ ember/
   core.py           the agent loop, tools, stores, LLM client, REPL
   config.py         non-secret defaults
 ```
-
-## How it works
-
-`Agent.run_turn()` is the loop everything else serves:
-
-1. The user message is appended; history is compacted if it crosses
-   `context_window * compact_threshold`.
-2. Repair passes run **every step** — oversized tool results are truncated, orphaned
-   tool calls and orphaned tool results are reconciled. Small models emit malformed
-   tool-call sequences constantly, and these keep the history API-valid.
-3. The system prompt is rebuilt from scratch each step and is not stored in the
-   message history.
-4. The model is called; tool calls are dispatched and their results appended; loop.
-   Otherwise the final text is returned.
-
-Three things worth knowing before changing anything:
-
-- **Tool registration is a global side effect.** The `@tool(...)` decorator inserts into
-  a module-level registry at import time. Importing a module that defines tools registers
-  them. Duplicate names raise.
-- **Behavior is configured from the workspace, not the code.** The system prompt
-  interpolates `MEMORY.md` and `AGENTS.md` read from the workspace root. To change how the
-  agent behaves, write `AGENTS.md` — don't patch the prompt template.
-- **All file access is confined** to the workspace root, and state persists to SQLite there
-  (`.ember.db`): a full-text-searchable memory store and an append-only, resumable session log.
-
-Built-in tools: `file`, `edit`, `exec`, `grep`, `memory`, `clarify`. The mutating ones prompt
-for confirmation unless `--yolo` is set.
