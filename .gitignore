@@ -1,0 +1,19 @@
+# secrets -- never committed, never read
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# agent runtime state
+workspace/
+.ember.db
+.ember.db-wal
+.ember.db-shm
+
+# local agent instructions
+CLAUDE.md
