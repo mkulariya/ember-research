@@ -196,16 +196,33 @@ class ToolCall:
     arguments: str
 
 
+# Chat Completions has no reasoning field. These are the names servers
+# actually add: DeepSeek and vLLM use reasoning_content, some gateways use
+# reasoning, Ollama's OpenAI endpoint uses thinking. First match wins.
+_REASONING_FIELDS = ("reasoning_content", "reasoning", "thinking")
+
+
 @dataclass
 class Message:
     role: Role
     content: str = ""
+    reasoning: str = ""
+    # Wire name the reasoning arrived on (reasoning_content, reasoning, thinking).
+    # Empty when there was none, or when it was only <think> markup in content.
+    # Echoed back under that same name. Never copied into content.
+    reasoning_field: str = ""
     tool_call_id: Optional[str] = None
     tool_calls: Optional[list[ToolCall]] = None
     timestamp: float = 0.0
 
     def to_openai(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"role": self.role, "content": self.content}
+        if (
+            self.role == "assistant"
+            and self.reasoning
+            and self.reasoning_field in _REASONING_FIELDS
+        ):
+            payload[self.reasoning_field] = self.reasoning
 
         if self.role == "assistant" and self.tool_calls:
             payload["tool_calls"] = [
@@ -248,9 +265,14 @@ class Message:
         if role not in {"system", "user", "assistant", "tool"}:
             role = "assistant"
 
+        content, reasoning, reasoning_field = _normalize_reasoning(
+            content, choice_msg
+        )
         return cls(
             role=role,
             content=content,
+            reasoning=reasoning,
+            reasoning_field=reasoning_field,
             tool_calls=parsed_tool_calls,
             timestamp=time.time(),
         )
@@ -344,6 +366,8 @@ def estimate_messages_tokens(messages: list[Message]) -> int:
     total = 0
     for m in messages:
         total += estimate_tokens(m.content or "") + 4
+        if m.reasoning and m.reasoning_field in _REASONING_FIELDS:
+            total += estimate_tokens(m.reasoning)
         if m.tool_calls:
             for tc in m.tool_calls:
                 total += estimate_tokens((tc.name or "") + (tc.arguments or "")) + 4
@@ -357,13 +381,15 @@ def _tool_truncation_budget(context_window: int) -> int:
 
 def truncate_oversized_tool_results(
     messages: list[Message], context_window: int
-) -> None:
+) -> int:
     max_chars = _tool_truncation_budget(context_window)
+    count = 0
     for m in messages:
         if m.role != "tool" or not m.content:
             continue
         if len(m.content) <= max_chars:
             continue
+        count += 1
         original_len = len(m.content)
         kept = m.content[:max_chars]
         newline_idx = kept.rfind("\n")
@@ -373,10 +399,12 @@ def truncate_oversized_tool_results(
             kept
             + f"\n\n[...truncated, original was {original_len} chars...]"
         )
+    return count
 
 
-def repair_orphaned_tool_calls(messages: list[Message]) -> None:
+def repair_orphaned_tool_calls(messages: list[Message]) -> int:
     n = len(messages)
+    dropped = 0
     for i, m in enumerate(messages):
         if m.role != "assistant" or not m.tool_calls:
             continue
@@ -389,12 +417,14 @@ def repair_orphaned_tool_calls(messages: list[Message]) -> None:
         if needed_ids == found_ids:
             continue
         kept_calls = [tc for tc in m.tool_calls if tc.id in found_ids]
+        dropped += len(m.tool_calls) - len(kept_calls)
         m.tool_calls = kept_calls or None
         if not m.tool_calls and not (m.content or "").strip():
             m.content = "[truncated tool calls]"
+    return dropped
 
 
-def repair_orphaned_tool_results(messages: list[Message]) -> None:
+def repair_orphaned_tool_results(messages: list[Message]) -> int:
     valid_ids: set[str] = set()
     kept: list[Message] = []
     for m in messages:
@@ -412,9 +442,11 @@ def repair_orphaned_tool_results(messages: list[Message]) -> None:
                 )
         else:
             kept.append(m)
-    if len(kept) != len(messages):
+    dropped = len(messages) - len(kept)
+    if dropped:
         messages.clear()
         messages.extend(kept)
+    return dropped
 
 
 def truncate_context_file(text: str, max_chars: int = 30_000) -> str:
@@ -715,7 +747,6 @@ class MemoryStore:
         self.memory_dir = self.workspace / "memory"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.memory_md_path = self.workspace / "MEMORY.md"
-        self.agents_md_path = self.workspace / "AGENTS.md"
         self.db_path = Path(db_path) if db_path else self.workspace / ".ember.db"
         self.conn = db_connect(str(self.db_path))
         init_schema(self.conn)
@@ -973,7 +1004,9 @@ class MemoryStore:
             },
         ]
         try:
-            summary = (llm.complete_plain(prompt) or "").strip()
+            summary = (
+                llm.complete_plain(prompt, purpose="memory_flush") or ""
+            ).strip()
         except Exception:  # noqa: BLE001
             log.exception("memory flush LLM call failed")
             return
@@ -994,14 +1027,6 @@ class MemoryStore:
             return ""
         return truncate_context_file(text, max_chars)
 
-    def read_agents_md(self, max_chars: int = 30_000) -> str:
-        if not self.agents_md_path.exists():
-            return ""
-        try:
-            text = self.agents_md_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return ""
-        return truncate_context_file(text, max_chars)
 
 
 # -----------------------------------------------------------------------------
@@ -1018,6 +1043,10 @@ def _message_to_dict(msg: Message) -> dict[str, Any]:
         "content": msg.content,
         "timestamp": msg.timestamp,
     }
+    if msg.reasoning:
+        payload["reasoning"] = msg.reasoning
+        if msg.reasoning_field in _REASONING_FIELDS:
+            payload["reasoning_field"] = msg.reasoning_field
     if msg.tool_call_id:
         payload["tool_call_id"] = msg.tool_call_id
     if msg.tool_calls:
@@ -1043,9 +1072,14 @@ def _dict_to_message(d: dict[str, Any]) -> Message:
     role = d.get("role", "user")
     if role not in {"system", "user", "assistant", "tool"}:
         role = "user"
+    field = d.get("reasoning_field") or ""
+    if field not in _REASONING_FIELDS:
+        field = ""
     return Message(
         role=role,
         content=d.get("content", "") or "",
+        reasoning=d.get("reasoning", "") or "",
+        reasoning_field=field,
         tool_call_id=d.get("tool_call_id"),
         tool_calls=tool_calls,
         timestamp=float(d.get("timestamp", 0.0) or 0.0),
@@ -1148,6 +1182,57 @@ class SessionStore:
             path.unlink()
         except FileNotFoundError:
             pass
+
+
+# -----------------------------------------------------------------------------
+# §10b TraceRecorder -- append-only trace log, never rewritten
+# -----------------------------------------------------------------------------
+
+
+class TraceRecorder:
+    """Append-only JSONL trace of everything a session did.
+
+    SessionStore is rewritten by compaction, and agent.messages is mutated by
+    the truncation/repair passes. This file never is: every llm_call event
+    carries the exact request the model saw (system prompt, messages, tools),
+    so the trace stays complete no matter what happens to history.
+
+    Events: session, turn_start, llm_call, tool, context_edit, turn_end.
+    session_id / turn_id / step are stamped onto every event; the Agent keeps
+    them current. Recording never raises into the agent loop.
+    """
+
+    def __init__(self, workspace: str | os.PathLike[str]) -> None:
+        self.traces_dir = Path(workspace).resolve() / ".traces"
+        self.traces_dir.mkdir(parents=True, exist_ok=True)
+        self.session_id: str = ""
+        self.turn_id: Optional[str] = None
+        self.step: int = 0
+
+    def _path(self, session_id: str) -> Path:
+        if not _SESSION_ID_RE.match(session_id):
+            raise ValueError(f"invalid session id: {session_id!r}")
+        return self.traces_dir / f"{session_id}.jsonl"
+
+    def record(self, event_type: str, **fields: Any) -> None:
+        if not self.session_id:
+            return
+        event = {
+            "type": event_type,
+            "ts": time.time(),
+            "session_id": self.session_id,
+            "turn_id": self.turn_id,
+            "step": self.step,
+            **fields,
+        }
+        try:
+            line = json.dumps(event, ensure_ascii=False, default=str)
+            with open(self._path(self.session_id), "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:  # noqa: BLE001
+            log.exception("trace write failed for %s event", event_type)
 
 
 # -----------------------------------------------------------------------------
@@ -1258,15 +1343,108 @@ def friendly_connection_error(exc: Exception, base_url: str) -> str:
     )
 
 
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+def _read_reasoning_field(obj: Any) -> tuple[str, str]:
+    """Return (text, wire_field) from a message or stream delta.
+
+    The OpenAI SDK keeps unknown JSON keys in `__pydantic_extra__` rather than
+    as declared attributes, so both places are checked. Returns ("", "") when
+    the server sent no separate reasoning channel.
+    """
+    extra = getattr(obj, "__pydantic_extra__", None)
+    for name in _REASONING_FIELDS:
+        val = getattr(obj, name, None)
+        if not isinstance(val, str) or not val:
+            if isinstance(extra, dict):
+                val = extra.get(name)
+        if isinstance(val, str) and val:
+            return val, name
+    return "", ""
+
+
+def _tag_prefix_len(text: str, tag: str) -> int:
+    """Length of the longest suffix of text that is a proper prefix of tag."""
+    limit = min(len(text), len(tag) - 1)
+    for size in range(limit, 0, -1):
+        if tag.startswith(text[-size:]):
+            return size
+    return 0
+
+
+class _ThinkSplitter:
+    """Pull <think> blocks out of a content stream. Tags may split across chunks."""
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._inside = False
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        self._pending += text
+        out: list[tuple[str, str]] = []
+        while self._pending:
+            tag = _THINK_CLOSE if self._inside else _THINK_OPEN
+            idx = self._pending.find(tag)
+            kind = "reasoning" if self._inside else "content"
+            if idx == -1:
+                hold = _tag_prefix_len(self._pending, tag)
+                emit = self._pending[:-hold] if hold else self._pending
+                self._pending = self._pending[-hold:] if hold else ""
+                if emit:
+                    out.append((kind, emit))
+                break
+            if idx:
+                out.append((kind, self._pending[:idx]))
+            self._pending = self._pending[idx + len(tag):]
+            self._inside = not self._inside
+        return out
+
+    def finish(self) -> list[tuple[str, str]]:
+        if not self._pending:
+            return []
+        kind = "reasoning" if self._inside else "content"
+        piece = self._pending
+        self._pending = ""
+        self._inside = False
+        return [(kind, piece)]
+
+
+def _split_think_markup(text: str) -> tuple[str, str]:
+    """Return (reasoning, content) with <think> blocks removed from content."""
+    splitter = _ThinkSplitter()
+    reasoning: list[str] = []
+    content: list[str] = []
+    for kind, piece in list(splitter.feed(text)) + list(splitter.finish()):
+        (reasoning if kind == "reasoning" else content).append(piece)
+    return "".join(reasoning), "".join(content)
+
+
+def _normalize_reasoning(content: str, obj: Any) -> tuple[str, str, str]:
+    """Return (content, reasoning, wire_field) for one completion message.
+
+    A server field is kept and echoed later under the same name. Markup is
+    removed from content either way. Markup alone has no wire field: it is
+    stored for display and is not written back into the next request.
+    """
+    field_text, field_name = _read_reasoning_field(obj)
+    tagged, cleaned = _split_think_markup(content or "")
+    if field_name:
+        return cleaned, field_text, field_name
+    return cleaned, tagged, ""
+
+
 class LLMClient:
     """OpenAI SDK wrapper with streaming, retries, overflow detection."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, trace: Optional[TraceRecorder] = None) -> None:
         self.config = config
+        self.trace = trace
         self.client = OpenAI(
             api_key=config.api_key or "placeholder",
             base_url=config.api_base_url,
-            timeout=120.0,
+            timeout=180.0,
             max_retries=0,
         )
         self._last_usage: Any = None
@@ -1298,9 +1476,44 @@ class LLMClient:
             stream = self.client.chat.completions.create(**kwargs)
 
         content_parts: list[str] = []
+        field_parts: list[str] = []
+        tagged_parts: list[str] = []
+        reasoning_field = ""
+        splitter = _ThinkSplitter()
         tool_calls_acc: dict[int, dict[str, str]] = {}
         usage: Any = None
         any_text_printed = False
+        header_printed = False
+
+        def show_reasoning(text: str) -> None:
+            nonlocal any_text_printed, header_printed
+            if not text or (not text.strip() and not any_text_printed):
+                return
+            if not header_printed:
+                sys.stdout.write(colorize("thinking\n", C_DIM))
+                header_printed = True
+            sys.stdout.write(colorize(text, C_DIM))
+            sys.stdout.flush()
+            any_text_printed = True
+
+        def take_piece(kind: str, piece: str) -> None:
+            nonlocal any_text_printed
+            if not piece:
+                return
+            if kind == "reasoning":
+                tagged_parts.append(piece)
+                # A real wire field wins. Don't also print the tags it already
+                # extracted, or the same thought shows up twice.
+                if not reasoning_field:
+                    show_reasoning(piece)
+                return
+            if not content_parts and any_text_printed and (field_parts or tagged_parts):
+                sys.stdout.write("\n")
+            if piece.strip() or any_text_printed:
+                sys.stdout.write(piece)
+                sys.stdout.flush()
+                any_text_printed = True
+            content_parts.append(piece)
 
         for chunk in stream:
             chunk_usage = getattr(chunk, "usage", None)
@@ -1313,13 +1526,17 @@ class LLMClient:
             if delta is None:
                 continue
 
+            delta_reasoning, delta_field = _read_reasoning_field(delta)
+            if delta_reasoning:
+                if not reasoning_field:
+                    reasoning_field = delta_field
+                field_parts.append(delta_reasoning)
+                show_reasoning(delta_reasoning)
+
             delta_content = getattr(delta, "content", None)
             if delta_content:
-                if delta_content.strip() or any_text_printed:
-                    sys.stdout.write(delta_content)
-                    sys.stdout.flush()
-                    any_text_printed = True
-                content_parts.append(delta_content)
+                for kind, piece in splitter.feed(delta_content):
+                    take_piece(kind, piece)
 
             delta_tool_calls = getattr(delta, "tool_calls", None) or []
             for tc_delta in delta_tool_calls:
@@ -1336,12 +1553,19 @@ class LLMClient:
                     if getattr(fn_obj, "arguments", None):
                         slot["arguments"] += fn_obj.arguments
 
+        for kind, piece in splitter.finish():
+            take_piece(kind, piece)
+
         if any_text_printed:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
         self._last_usage = usage
         content = "".join(content_parts)
+        if reasoning_field:
+            reasoning = "".join(field_parts)
+        else:
+            reasoning = "".join(tagged_parts)
         tool_calls: Optional[list[ToolCall]] = None
         if tool_calls_acc:
             tool_calls = [
@@ -1355,11 +1579,13 @@ class LLMClient:
         return Message(
             role="assistant",
             content=content,
+            reasoning=reasoning,
+            reasoning_field=reasoning_field,
             tool_calls=tool_calls,
             timestamp=time.time(),
         )
 
-    def _call_plain(self, messages: list[dict[str, Any]]) -> str:
+    def _call_plain(self, messages: list[dict[str, Any]]) -> Message:
         resp = self.client.chat.completions.create(
             model=self.config.model,
             messages=messages,
@@ -1367,7 +1593,16 @@ class LLMClient:
         )
         self._last_usage = getattr(resp, "usage", None)
         choice = resp.choices[0]
-        return choice.message.content or ""
+        content, reasoning, reasoning_field = _normalize_reasoning(
+            choice.message.content or "", choice.message
+        )
+        return Message(
+            role="assistant",
+            content=content,
+            reasoning=reasoning,
+            reasoning_field=reasoning_field,
+            timestamp=time.time(),
+        )
 
     # --- public API with retry ---------------------------------------------
 
@@ -1376,19 +1611,48 @@ class LLMClient:
         messages: list[dict[str, Any]],
         tools: Optional[list[dict[str, Any]]] = None,
         stream: bool = True,
+        purpose: str = "agent",
     ) -> Message:
-        return self._with_retry(
+        t0 = time.time()
+        msg = self._with_retry(
             lambda: self._call_streaming(messages, tools)
             if stream
-            else Message(
-                role="assistant",
-                content=self._call_plain(messages),
-                timestamp=time.time(),
-            )
+            else self._call_plain(messages)
         )
+        self._record_call(purpose, messages, tools, msg, t0)
+        return msg
 
-    def complete_plain(self, messages: list[dict[str, Any]]) -> str:
-        return self._with_retry(lambda: self._call_plain(messages))
+    def complete_plain(
+        self, messages: list[dict[str, Any]], purpose: str = "plain"
+    ) -> str:
+        t0 = time.time()
+        msg = self._with_retry(lambda: self._call_plain(messages))
+        self._record_call(purpose, messages, None, msg, t0)
+        return msg.content
+
+    def _record_call(
+        self,
+        purpose: str,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]],
+        response: Message,
+        t0: float,
+    ) -> None:
+        if self.trace is None:
+            return
+        usage = self._last_usage
+        self.trace.record(
+            "llm_call",
+            purpose=purpose,
+            model=self.config.model,
+            request={"messages": messages, "tools": tools},
+            response=_message_to_dict(response),
+            usage=None if usage is None else {
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
+            },
+            latency_s=round(time.time() - t0, 3),
+        )
 
     def _with_retry(self, fn: Callable[[], Any]) -> Any:
         max_retries = max(1, self.config.llm_max_retries)
@@ -1507,7 +1771,9 @@ def compact_history(
 
     text_block = _format_summary_block(to_summarize)
     try:
-        summary = llm.complete_plain(_summary_prompt(text_block)).strip()
+        summary = llm.complete_plain(
+            _summary_prompt(text_block), purpose="compaction"
+        ).strip()
     except Exception:  # noqa: BLE001
         log.exception("compaction summary failed; falling back to head+tail trim")
         new_messages = [messages[0]] + keep
@@ -1535,45 +1801,47 @@ def compact_history(
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are ember, a minimalist learning-oriented coding agent.
+You are a research agent. Today is {today}. Workspace: {workspace}
 
-# Identity
-- Operate entirely within the workspace: {workspace}
-- Use tools to inspect and modify files. Never assume file contents.
-- When unsure, read the file before editing it.
-- After learning durable info (decisions, preferences, plans), use `memory` action=write to persist under `memory/{today}.md`.
+# Pick a mode before anything else
+DIRECT -- general knowledge, conversation, or a question about this
+workspace. Answer in a few sentences.
 
-# Runtime
-- OS: {os} ({arch})
-- Shell: {shell}
-- Model: {model}
-- Workspace: {workspace}
-- Session: {session_id}
-- Date: {today}
+RESEARCH -- the user says research / investigate / find out / sources,
+OR the answer needs current events, specific numbers, quotes, or
+citations. Run the loop below.
 
-# Memory Recall
-Before answering about prior work, decisions, or personal context:
-1. Call `memory` action=search to find relevant snippets.
-2. Read full source lines via `file` action=read when you need context.
-3. Cite as `Source: path#Lstart-Lend`.
+# Research loop
+1. Write 2-4 sub-questions.
+2. web_search each one. Snippets are NOT evidence.
+3. web_fetch the 2-3 best URLs per sub-question.
+4. If two sources disagree, fetch a third and report the disagreement.
+5. Prefer primary sources -- papers, docs, filings -- over aggregators.
+6. Stop when new fetches stop changing the answer.
+7. Write the report. Save it with file action=write only if asked.
 
-NOTE: MEMORY.md contents are sent to the LLM on every turn. Do not store secrets there.
+# Rules
+- Call tools. Never write a description of a tool call.
+- Never cite a URL you did not fetch.
+- No invented numbers, dates, quotes, or sources.
+- Separate what a source says from what you conclude.
+  Unverifiable -> mark UNVERIFIED.
+- Synthesize across sources. Do not summarize them one at a time.
+- Keep each tool argument small.
 
-# MEMORY.md
-{memory_md_section}
-
-# Workspace Instructions (AGENTS.md)
-{agents_md_section}
+# Report format (RESEARCH mode only)
+## Objective & scope -- the question, how you read it, what you excluded.
+## Method -- what you searched, what you fetched, how many sources.
+## Key findings -- the synthesized answer, in full. Several paragraphs.
+## Evidence & analysis -- claim by claim. State what the source says,
+   then what you infer from it. Each claim ends with its source URL.
+## Conflicting evidence & limitations -- where sources disagree, weak
+   spots, what you could not verify.
+## Conclusions -- what follows from the evidence, and your confidence.
+## Sources -- numbered, every URL you fetched.
 
 # Tools
-Prefer `grep`/`file list` before `exec`. They are faster and confined.
-
 {tool_list}
-
-# Safety
-- Tool calls modifying state (edit, file write/append, exec, memory write) require user confirmation.
-- Keep tool outputs short. If a read would exceed 400KB, use offset/limit.
-- If you hit a dead end, ask the user via `clarify` rather than spinning.
 """
 
 
@@ -1593,24 +1861,11 @@ def _format_tool_list(tools: dict[str, Tool]) -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt(
-    config: Config,
-    session_id: str,
-    memory_store: MemoryStore,
-) -> str:
+def build_system_prompt(config: Config, session_id: str) -> str:
     info = _runtime_info()
-    memory_md = memory_store.read_memory_md()
-    agents_md = memory_store.read_agents_md()
     return SYSTEM_PROMPT_TEMPLATE.format(
         workspace=config.workspace,
-        os=info["os"],
-        arch=info["arch"],
-        shell=info["shell"],
-        model=config.model,
-        session_id=session_id or "(no session)",
         today=info["today"],
-        memory_md_section=memory_md.strip() or "(empty)",
-        agents_md_section=agents_md.strip() or "(empty)",
         tool_list=_format_tool_list(TOOLS),
     )
 
@@ -1622,6 +1877,7 @@ def build_system_prompt(
 _IGNORE_DIRS = {
     ".git",
     ".sessions",
+    ".traces",
     "node_modules",
     "__pycache__",
     ".venv",
@@ -2405,6 +2661,7 @@ class Agent:
         session_store: SessionStore,
         llm: LLMClient,
         registry: ToolRegistry,
+        trace: TraceRecorder,
     ) -> None:
         self.config = config
         self.confiner = confiner
@@ -2412,6 +2669,7 @@ class Agent:
         self.session_store = session_store
         self.llm = llm
         self.registry = registry
+        self.trace = trace
         self.messages: list[Message] = []
         self.session_id: str = ""
         self.compaction_count: int = 0
@@ -2435,6 +2693,18 @@ class Agent:
             self.session_id = self.session_store.new_session_id()
             self.messages = []
             log.info("started new session %s", self.session_id)
+        self.trace.session_id = self.session_id
+        self.trace.turn_id = None
+        self.trace.step = 0
+        self.trace.record(
+            "session",
+            resumed=bool(session_id),
+            config={
+                k: v
+                for k, v in dataclasses.asdict(self.config).items()
+                if k != "api_key"
+            },
+        )
         return self.session_id
 
     @property
@@ -2518,6 +2788,13 @@ class Agent:
                 len(new_msgs),
                 summarized,
             )
+            self.trace.record(
+                "context_edit",
+                kind="compaction",
+                summarized=summarized,
+                before=before,
+                after=len(new_msgs),
+            )
         return summarized
 
     # --- cost display -------------------------------------------------------
@@ -2539,6 +2816,12 @@ class Agent:
 
     # --- main loop ----------------------------------------------------------
 
+    def _end_turn(self, outcome: str, reply: str) -> str:
+        self.trace.record("turn_end", outcome=outcome, reply=reply)
+        self.trace.turn_id = None
+        self.trace.step = 0
+        return reply
+
     def run_turn(self, user_input: str) -> str:
         text = (user_input or "").strip()
         if not text:
@@ -2555,6 +2838,10 @@ class Agent:
         except Exception:  # noqa: BLE001
             log.exception("failed to append user message to session log")
 
+        self.trace.turn_id = hashlib.sha256(os.urandom(16)).hexdigest()[:12]
+        self.trace.step = 0
+        self.trace.record("turn_start", user=text)
+
         soft_limit = self.config.context_window * self.config.compact_threshold
         if estimate_messages_tokens(self.messages) > soft_limit:
             log.info("soft compaction threshold reached; compacting")
@@ -2568,23 +2855,28 @@ class Agent:
         while True:
             if self.cancel_flag.is_set():
                 print(colorize("\n[cancelled]", C_YELLOW))
-                return "[cancelled]"
+                return self._end_turn("cancelled", "[cancelled]")
 
             step += 1
+            self.trace.step = step
             if step > self.config.max_steps:
                 msg = f"[max_steps={self.config.max_steps} reached]"
                 print(colorize(msg, C_YELLOW))
-                return msg
+                return self._end_turn("max_steps", msg)
 
-            truncate_oversized_tool_results(
-                self.messages, self.config.context_window
-            )
-            repair_orphaned_tool_calls(self.messages)
-            repair_orphaned_tool_results(self.messages)
+            edits = {
+                "truncated_tool_results": truncate_oversized_tool_results(
+                    self.messages, self.config.context_window
+                ),
+                "dropped_tool_calls": repair_orphaned_tool_calls(self.messages),
+                "dropped_tool_results": repair_orphaned_tool_results(
+                    self.messages
+                ),
+            }
+            if any(edits.values()):
+                self.trace.record("context_edit", kind="repair", **edits)
 
-            sys_prompt = build_system_prompt(
-                self.config, self.session_id, self.memory
-            )
+            sys_prompt = build_system_prompt(self.config, self.session_id)
             api_msgs: list[dict[str, Any]] = [
                 {"role": "system", "content": sys_prompt}
             ]
@@ -2603,15 +2895,17 @@ class Agent:
                 )
                 summarized = self.compact()
                 if summarized == 0:
-                    return colorize(
+                    return self._end_turn("overflow", colorize(
                         "[cannot recover from context overflow]",
                         C_RED,
-                    )
+                    ))
                 continue
             except ConnectionError as exc:
                 err = str(exc)
                 print(colorize(f"\n{err}", C_RED))
-                return f"[llm connection error: {err}]"
+                return self._end_turn(
+                    "llm_error", f"[llm connection error: {err}]"
+                )
 
             usage = self.llm.last_usage
             if usage is not None:
@@ -2629,7 +2923,9 @@ class Agent:
                     self.session_store.append(self.session_id, assistant_msg)
                 except Exception:  # noqa: BLE001
                     log.exception("session append failed")
-                return "[empty response from model]"
+                return self._end_turn(
+                    "empty_response", "[empty response from model]"
+                )
 
             self.messages.append(assistant_msg)
             try:
@@ -2641,8 +2937,18 @@ class Agent:
                 for tc in assistant_msg.tool_calls:
                     if self.cancel_flag.is_set():
                         print(colorize("\n[cancelled]", C_YELLOW))
-                        return "[cancelled]"
+                        return self._end_turn("cancelled", "[cancelled]")
+                    t0 = time.time()
                     result = self._dispatch_tool_call(tc)
+                    self.trace.record(
+                        "tool",
+                        call_id=tc.id,
+                        name=tc.name,
+                        arguments=tc.arguments,
+                        result=result.content,
+                        is_error=result.is_error,
+                        elapsed_s=round(time.time() - t0, 3),
+                    )
                     tool_msg = Message(
                         role="tool",
                         content=result.content,
@@ -2661,7 +2967,7 @@ class Agent:
                 prompt_tokens_total, completion_tokens_total, elapsed
             )
             print(colorize(summary_line, C_DIM))
-            return assistant_msg.content or ""
+            return self._end_turn("final", assistant_msg.content or "")
 
 
 # -----------------------------------------------------------------------------
@@ -3005,7 +3311,7 @@ _MEMORY_MD_TEMPLATE = """\
 # MEMORY.md
 
 This file is the agent's durable, hand-editable long-term memory.
-It is injected into the system prompt on every turn, so keep it concise.
+It is searchable via the `memory` tool, not injected into the prompt.
 
 ## How to use
 - Add short bullet entries that future sessions should know about.
@@ -3017,20 +3323,6 @@ It is injected into the system prompt on every turn, so keep it concise.
 - Coding style: small, explicit, no hidden globals.
 - Open question: how much logging is too much?
 """
-
-_AGENTS_MD_TEMPLATE = """\
-# AGENTS.md
-
-Workspace-wide instructions injected into the system prompt each turn.
-Use it to describe the project goals, conventions, and any ground rules
-the agent must follow.
-
-## Examples
-- This workspace is a learning sandbox -- prefer verbose, readable code.
-- Always run tests after editing core modules.
-- Do not touch files under `third_party/` without asking.
-"""
-
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -3089,11 +3381,8 @@ def _ensure_starter_files(workspace: str | os.PathLike[str]) -> None:
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     mem_md = root / "MEMORY.md"
-    agents_md = root / "AGENTS.md"
     if not mem_md.exists():
         mem_md.write_text(_MEMORY_MD_TEMPLATE, encoding="utf-8")
-    if not agents_md.exists():
-        agents_md.write_text(_AGENTS_MD_TEMPLATE, encoding="utf-8")
     (root / "memory").mkdir(parents=True, exist_ok=True)
 
 
@@ -3104,7 +3393,8 @@ def bootstrap(config: Config) -> tuple[Agent, SessionStore]:
     memory_store = MemoryStore(str(confiner.root))
     memory_store.sync_all()
     session_store = SessionStore(str(confiner.root))
-    llm = LLMClient(config)
+    trace = TraceRecorder(str(confiner.root))
+    llm = LLMClient(config, trace)
     ctx = ToolContext(
         confiner=confiner,
         workspace=str(confiner.root),
@@ -3119,6 +3409,7 @@ def bootstrap(config: Config) -> tuple[Agent, SessionStore]:
         session_store,
         llm,
         registry,
+        trace,
     )
     return agent, session_store
 

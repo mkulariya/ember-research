@@ -7,5 +7,9 @@ runs and `main()` for the REPL.
 
 from ember.core import Agent, Config, bootstrap, main
 
+# Import for the side effect: registers web_search / web_fetch into core.TOOLS.
+# Must come after the core import above -- core owns the registry.
+from ember import web_tools  # noqa: F401,E402
+
 __version__ = "0.1.0"
 __all__ = ["Agent", "Config", "bootstrap", "main"]
