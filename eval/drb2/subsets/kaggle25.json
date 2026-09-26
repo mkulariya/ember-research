@@ -1,0 +1,177 @@
+[
+  {
+    "idx": 2,
+    "id": "task1+",
+    "theme": "Finance & Business",
+    "description": "An Analysis of Social Security Cases in South Asia",
+    "rubrics": 109
+  },
+  {
+    "idx": 4,
+    "id": "task2+",
+    "theme": "Finance & Business",
+    "description": "A Detailed Report on the Retirement Savings Gap in Select Asian Countries",
+    "rubrics": 72
+  },
+  {
+    "idx": 12,
+    "id": "task55",
+    "theme": "Finance & Business",
+    "description": "Research Report on AI-Enhanced Portfolio Management",
+    "rubrics": 56
+  },
+  {
+    "idx": 22,
+    "id": "task10",
+    "theme": "Science & Technology",
+    "description": "The Life Cycle Cost of Electric Vehicles and Policy Support",
+    "rubrics": 65
+  },
+  {
+    "idx": 28,
+    "id": "task12+",
+    "theme": "Science & Technology",
+    "description": "Comparative Analysis of Pumps as Turbines (PATs) and Other Hydraulic Turbines",
+    "rubrics": 80
+  },
+  {
+    "idx": 32,
+    "id": "task63",
+    "theme": "Science & Technology",
+    "description": "Research on Lithium Niobate (LiNbO\u2083) Single Crystal and Related Materials",
+    "rubrics": 106
+  },
+  {
+    "idx": 36,
+    "id": "task15",
+    "theme": "Science & Technology",
+    "description": "A Survey on the Current Status of Quantum Technology Standardization",
+    "rubrics": 59
+  },
+  {
+    "idx": 38,
+    "id": "task65+",
+    "theme": "Science & Technology",
+    "description": "A Review of Environmental Control Algorithms Used in Modern Agricultural Greenhouses",
+    "rubrics": 92
+  },
+  {
+    "idx": 46,
+    "id": "task68+",
+    "theme": "Software Development",
+    "description": "Research on Auto-Scaling Technology in Cloud Computing",
+    "rubrics": 54
+  },
+  {
+    "idx": 48,
+    "id": "task69",
+    "theme": "Software Development",
+    "description": "An Analysis of the Concepts of Big Loop and Atomization in AI Research",
+    "rubrics": 70
+  },
+  {
+    "idx": 54,
+    "id": "task71",
+    "theme": "Education & Jobs",
+    "description": "An Overview of AI Tools Providing Writing Scaffolds for K-12 English Students",
+    "rubrics": 68
+  },
+  {
+    "idx": 56,
+    "id": "task72",
+    "theme": "Education & Jobs",
+    "description": "A Review of the Impact of Generative Artificial Intelligence on the Labor Market",
+    "rubrics": 70
+  },
+  {
+    "idx": 62,
+    "id": "task75",
+    "theme": "Health",
+    "description": "Effect of salt substitutes on cardiovascular risk",
+    "rubrics": 39
+  },
+  {
+    "idx": 68,
+    "id": "task27+",
+    "theme": "Health",
+    "description": "Conceptual Analysis of AI-Assisted Shared Decision-Making in Healthcare",
+    "rubrics": 60
+  },
+  {
+    "idx": 74,
+    "id": "task29+",
+    "theme": "Literature",
+    "description": "Policies and Practices of Open Research Data in China",
+    "rubrics": 74
+  },
+  {
+    "idx": 80,
+    "id": "task81",
+    "theme": "History",
+    "description": "Memory Politics of Eastern Europe, Trauma Theory, and Postcolonialism",
+    "rubrics": 37
+  },
+  {
+    "idx": 90,
+    "id": "task84+",
+    "theme": "Hardware",
+    "description": "Challenges and Solutions for SRAM Operating Under Low Voltage",
+    "rubrics": 101
+  },
+  {
+    "idx": 92,
+    "id": "task35",
+    "theme": "Industrial",
+    "description": "A Literature Review of Integrated Urban Water Management Models",
+    "rubrics": 84
+  },
+  {
+    "idx": 98,
+    "id": "task37",
+    "theme": "Art & Design",
+    "description": "A Study of the Educational Work of Jazz Pianist Mary Lou Williams in Her Later Years",
+    "rubrics": 57
+  },
+  {
+    "idx": 104,
+    "id": "task40",
+    "theme": "Crime & Law",
+    "description": "China's Policies on Organ Transplantation and Organs from Executed Prisoners",
+    "rubrics": 40
+  },
+  {
+    "idx": 106,
+    "id": "task41",
+    "theme": "Entertainment",
+    "description": "A Commercial and Cultural Analysis of the Film \"Ne Zha\"",
+    "rubrics": 102
+  },
+  {
+    "idx": 112,
+    "id": "task92",
+    "theme": "Sports & Fitness",
+    "description": "A Review of Video Activity Recognition Technology",
+    "rubrics": 73
+  },
+  {
+    "idx": 116,
+    "id": "task45+",
+    "theme": "Religion",
+    "description": "Analyzing the Quran through Western contemporary philosophy of art.",
+    "rubrics": 56
+  },
+  {
+    "idx": 122,
+    "id": "task46",
+    "theme": "Home & Hobbies",
+    "description": "Research on Climate-Adaptive Housing",
+    "rubrics": 87
+  },
+  {
+    "idx": 128,
+    "id": "task48",
+    "theme": "Food & Dining",
+    "description": "Report on the Impact of Protein Intake on Muscle and Bone Health in Older Adults",
+    "rubrics": 65
+  }
+]

@@ -1,0 +1,51 @@
+[
+  {
+    "idx": 4,
+    "id": "task2+",
+    "theme": "Finance & Business",
+    "description": "A Detailed Report on the Retirement Savings Gap in Select Asian Countries",
+    "rubrics": 72
+  },
+  {
+    "idx": 22,
+    "id": "task10",
+    "theme": "Science & Technology",
+    "description": "The Life Cycle Cost of Electric Vehicles and Policy Support",
+    "rubrics": 65
+  },
+  {
+    "idx": 48,
+    "id": "task69",
+    "theme": "Software Development",
+    "description": "An Analysis of the Concepts of Big Loop and Atomization in AI Research",
+    "rubrics": 70
+  },
+  {
+    "idx": 54,
+    "id": "task71",
+    "theme": "Education & Jobs",
+    "description": "An Overview of AI Tools Providing Writing Scaffolds for K-12 English Students",
+    "rubrics": 68
+  },
+  {
+    "idx": 68,
+    "id": "task27+",
+    "theme": "Health",
+    "description": "Conceptual Analysis of AI-Assisted Shared Decision-Making in Healthcare",
+    "rubrics": 60
+  },
+  {
+    "idx": 80,
+    "id": "task81",
+    "theme": "History",
+    "description": "Memory Politics of Eastern Europe, Trauma Theory, and Postcolonialism",
+    "rubrics": 37
+  },
+  {
+    "idx": 90,
+    "id": "task84+",
+    "theme": "Hardware",
+    "description": "Challenges and Solutions for SRAM Operating Under Low Voltage",
+    "rubrics": 101
+  }
+]

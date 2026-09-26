@@ -17,3 +17,7 @@ workspace/
 
 # local agent instructions
 CLAUDE.md
+
+# downloaded benchmark files (eval/drb2/fetch.py)
+eval/drb2/upstream/
+eval/runs/
