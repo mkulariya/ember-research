@@ -213,10 +213,10 @@ def _as_url_list(args: dict[str, Any]) -> list[str]:
 @tool(
     name="web_fetch",
     description=(
-        "Fetch up to 10 URLs and return their main content as clean Markdown, "
-        "with navigation and boilerplate stripped. Renders JavaScript pages. "
-        "This is how you actually READ a source -- always fetch before citing, "
-        "and cite the URL you fetched."
+        "Read web pages from the live internet. Give it one or more URLs and it "
+        "returns each page's full text as clean Markdown. Use it to read a page "
+        "before relying on it or citing it. This is real web access, not a "
+        "simulation: call it whenever you need what a page actually says."
     ),
     parameters={
         "type": "object",
