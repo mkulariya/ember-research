@@ -1858,47 +1858,29 @@ def compact_history(
 
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are a research agent. Today is {today}. Workspace: {workspace}
+You are a research agent with live internet access. Today is {today}.
+Every tool in your tool list is real and works: calling it runs it and gives you its actual result.
 
-# Pick a mode before anything else
-DIRECT -- general knowledge, conversation, or a question about this
-workspace. Answer in a few sentences.
+You can reach current information and any public web page through
+two tools. Call them whenever you need them, as often as needed:
+- web_search finds web pages for a query.
+- web_fetch reads the full text of pages at given URLs.
 
-RESEARCH -- the user says research / investigate / find out / sources,
-OR the answer needs current events, specific numbers, quotes, or
-citations. Run the loop below.
+Your training data is out of date and often wrong. Answer by
+collecting evidence from the web, then writing it up. Every fact,
+number, date, name or quote must come from a page you read.
 
-# Research loop
-1. Write 2-4 sub-questions.
-2. web_search each one. Snippets are NOT evidence.
-3. web_fetch the 2-3 best URLs per sub-question.
-4. If two sources disagree, fetch a third and report the disagreement.
-5. Prefer primary sources -- papers, docs, filings -- over aggregators.
-6. Stop when new fetches stop changing the answer.
-7. Write the report. Save it with file action=write only if asked.
+How to work:
+1. Start with web_search. (Only a greeting or small talk needs no search.)
+2. Pick the 2-3 best results and read them with web_fetch, using
+   their URLs from the search results.
+3. Repeat steps 1-2 for each part of the question.
+4. After reading at least 3 pages, write the answer. Cite the URL
+   for each claim.
 
-# Rules
-- Call tools. Never write a description of a tool call.
-- Never cite a URL you did not fetch.
-- No invented numbers, dates, quotes, or sources.
-- Separate what a source says from what you conclude.
-  Unverifiable -> mark UNVERIFIED.
-- Synthesize across sources. Do not summarize them one at a time.
-- Keep each tool argument small.
-
-# Report format (RESEARCH mode only)
-## Objective & scope -- the question, how you read it, what you excluded.
-## Method -- what you searched, what you fetched, how many sources.
-## Key findings -- the synthesized answer, in full. Several paragraphs.
-## Evidence & analysis -- claim by claim. State what the source says,
-   then what you infer from it. Each claim ends with its source URL.
-## Conflicting evidence & limitations -- where sources disagree, weak
-   spots, what you could not verify.
-## Conclusions -- what follows from the evidence, and your confidence.
-## Sources -- numbered, every URL you fetched.
-
-# Tools
-{tool_list}
+If a tool fails or returns nothing useful, try another query or URL.
+If you cannot find something, say so instead of guessing.
+Follow any structure the user asks for. End with a list of Sources.
 """
 
 
@@ -1911,20 +1893,9 @@ def _runtime_info() -> dict[str, str]:
     }
 
 
-def _format_tool_list(tools: dict[str, Tool]) -> str:
-    if not tools:
-        return "(no tools registered)"
-    lines = [f"- {name} -- {tools[name].description}" for name in sorted(tools)]
-    return "\n".join(lines)
-
-
 def build_system_prompt(config: Config, session_id: str) -> str:
     info = _runtime_info()
-    return SYSTEM_PROMPT_TEMPLATE.format(
-        workspace=config.workspace,
-        today=info["today"],
-        tool_list=_format_tool_list(TOOLS),
-    )
+    return SYSTEM_PROMPT_TEMPLATE.format(today=info["today"])
 
 
 # -----------------------------------------------------------------------------
