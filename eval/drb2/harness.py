@@ -28,7 +28,6 @@ REPO = HERE.parent.parent
 UPSTREAM = HERE / "upstream"
 RUNS = Path(os.environ.get("EMBER_EVAL_RUNS", REPO / "eval" / "runs"))
 
-REPORT_SUFFIX = "\n\nWrite the complete report in Markdown as your final answer."
 # Interactive or unsafe under yolo; a benchmark run has no one to answer them.
 REMOVED_TOOLS = ("exec", "clarify")
 
@@ -137,7 +136,9 @@ def run_task(a: argparse.Namespace) -> dict:
     agent, _ = core.bootstrap(config)
     agent.start_session()
     t0 = time.time()
-    reply = agent.run_turn(task["content"]["task"] + REPORT_SUFFIX)
+    # The DRB2 task text is sent as-is: an added "final answer" instruction
+    # made the model skip tools and write from memory.
+    reply = agent.run_turn(task["content"]["task"])
     elapsed = time.time() - t0
 
     trace = Path(config.workspace) / ".traces" / f"{agent.session_id}.jsonl"
