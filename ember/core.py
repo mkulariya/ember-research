@@ -1715,33 +1715,88 @@ _COMPACTION_HEADER = "## [Compacted conversation history]"
 _COMPACTION_FOOTER = "## [End compacted history -- resume below]"
 
 
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n[... {len(text) - limit} more characters truncated]"
+
+
 def _format_summary_block(messages_to_summarize: list[Message]) -> str:
-    return "\n\n".join(
-        f"[{m.role}] {(m.content or '')[:1000]}"
-        for m in messages_to_summarize
-        if (m.content or "").strip() or m.role != "tool"
-    )
+    parts: list[str] = []
+    for m in messages_to_summarize:
+        content = (m.content or "").strip()
+        if m.role == "user" and content.startswith(_COMPACTION_HEADER):
+            # The previous summary goes in whole, so this pass updates it
+            # instead of summarizing a clipped copy of it.
+            parts.append(f"<previous-summary>\n{content}\n</previous-summary>")
+            continue
+        if content:
+            if m.role == "tool":
+                content = _clip(content, 2000)
+            parts.append(f"[{m.role}] {content}")
+        for tc in m.tool_calls or []:
+            parts.append(f"[tool call] {tc.name}({_clip(tc.arguments or '', 500)})")
+    return "\n\n".join(parts)
 
 
-def _summary_prompt(text_block: str) -> list[dict[str, str]]:
+def _summary_prompt(text_block: str, kept_block: str) -> list[dict[str, str]]:
     return [
         {
             "role": "system",
-            "content": "You are a conversation summarizer.",
+            "content": (
+                "You write checkpoint summaries of an agent conversation, so "
+                "the agent can continue after older messages are removed. Do "
+                "not continue the conversation or answer anything in it. "
+                "Output only the summary."
+            ),
         },
         {
             "role": "user",
             "content": (
-                "Summarize concisely, preserving: decisions, key facts, "
-                "TODOs, open questions, and tool outputs future turns will "
-                "need. Keep it dense.\n\n" + text_block
+                "Summarize <conversation> for the agent that will continue "
+                "it.\n\n"
+                "Rules:\n"
+                "- <previous-summary>, if present, covers everything before "
+                "the messages that follow it. Preserve it: keep every fact "
+                "that is still true, update what later messages changed, and "
+                "add what is new.\n"
+                "- Keep exact file paths, names, numbers, dates, URLs, and "
+                "error messages.\n"
+                "- Text ending in \"[... N more characters truncated]\" is "
+                "partial. Do not report the missing part, or the cut, as a "
+                "fact.\n"
+                "- <kept> holds the newest messages. They stay in the context "
+                "verbatim after your summary. Do not summarize them and do "
+                "not contradict them. Something missing from <conversation> "
+                "may be in <kept>.\n"
+                "- The agent never sees these tags. Do not write "
+                "<conversation>, <kept>, or <previous-summary> in the "
+                "summary; say \"the messages after this summary\" instead.\n\n"
+                "Use these sections:\n"
+                "## Goal\n"
+                "## Constraints & preferences\n"
+                "## Progress\n"
+                "### Done\n"
+                "### In progress\n"
+                "### Blocked\n"
+                "## Key decisions\n"
+                "## Next steps\n"
+                "## Critical context\n\n"
+                f"<conversation>\n{text_block}\n</conversation>\n\n"
+                f"<kept>\n{kept_block}\n</kept>"
             ),
         },
     ]
 
 
 def _compaction_message(summary_text: str) -> Message:
-    body = f"{_COMPACTION_HEADER}\n\n{summary_text}\n\n{_COMPACTION_FOOTER}"
+    body = (
+        f"{_COMPACTION_HEADER}\n"
+        "The conversation before this point was compacted into the summary "
+        "below. It is background, not a new request from the user. Messages "
+        "after it are newer and take precedence.\n\n"
+        f"{summary_text}\n\n{_COMPACTION_FOOTER}"
+    )
     return Message(role="user", content=body, timestamp=time.time())
 
 
@@ -1756,35 +1811,37 @@ def compact_history(
     if len(messages) < 4:
         return messages, 0
 
+    keep_last = min(max(1, keep_fresh), len(messages))
+    summarize_end = len(messages) - keep_last
+    # Never start the kept tail on a tool result: its call would be
+    # summarized away and the result dropped as an orphan.
+    while summarize_end > 0 and messages[summarize_end].role == "tool":
+        summarize_end -= 1
+    # Replacing a single message with a single summary saves nothing.
+    if summarize_end <= 1:
+        return messages, 0
+
     try:
         memory.flush_conversation(messages, llm)
     except Exception:  # noqa: BLE001
         log.exception("memory flush during compaction failed")
 
-    keep_last = min(max(1, keep_fresh), len(messages))
-    summarize_end = len(messages) - keep_last
-    if summarize_end <= 0:
-        return messages, 0
-
     to_summarize = messages[:summarize_end]
     keep = messages[summarize_end:]
 
     text_block = _format_summary_block(to_summarize)
+    kept_block = _format_summary_block(keep)
     try:
         summary = llm.complete_plain(
-            _summary_prompt(text_block), purpose="compaction"
+            _summary_prompt(text_block, kept_block), purpose="compaction"
         ).strip()
     except Exception:  # noqa: BLE001
-        log.exception("compaction summary failed; falling back to head+tail trim")
-        new_messages = [messages[0]] + keep
-        try:
-            session_store.rewrite(session_id, new_messages)
-        except Exception:  # noqa: BLE001
-            log.exception("session rewrite failed during fallback compaction")
-        return new_messages, summarize_end
+        log.exception("compaction summary failed; history left unchanged")
+        return messages, 0
 
     if not summary:
-        summary = "(no summary produced)"
+        log.warning("compaction produced an empty summary; history left unchanged")
+        return messages, 0
 
     compaction_msg = _compaction_message(summary)
     new_messages = [compaction_msg] + keep
@@ -2843,9 +2900,7 @@ class Agent:
         self.trace.record("turn_start", user=text)
 
         soft_limit = self.config.context_window * self.config.compact_threshold
-        if estimate_messages_tokens(self.messages) > soft_limit:
-            log.info("soft compaction threshold reached; compacting")
-            self.compact()
+        next_soft_compact_at = 0
 
         step = 0
         prompt_tokens_total = 0
@@ -2875,6 +2930,23 @@ class Agent:
             }
             if any(edits.values()):
                 self.trace.record("context_edit", kind="repair", **edits)
+
+            # Checked before every model call, since one tool loop can grow
+            # past the limit. If compaction fails or cannot get under the
+            # limit, retry only after keep_fresh more messages arrive, so the
+            # next attempt has new material and a failing summarizer is not
+            # called on every step. The overflow handler still runs.
+            if (
+                len(self.messages) >= next_soft_compact_at
+                and estimate_messages_tokens(self.messages) > soft_limit
+            ):
+                log.info("soft compaction threshold reached; compacting")
+                self.compact()
+                next_soft_compact_at = 0
+                if estimate_messages_tokens(self.messages) > soft_limit:
+                    next_soft_compact_at = (
+                        len(self.messages) + self.config.compact_keep_fresh
+                    )
 
             sys_prompt = build_system_prompt(self.config, self.session_id)
             api_msgs: list[dict[str, Any]] = [
